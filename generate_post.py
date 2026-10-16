@@ -11,7 +11,9 @@ import datetime as dt
 import glob
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -44,48 +46,71 @@ def recent_posts(limit=14):
     return "\n\n".join(out)
 
 
-ENDPOINTS = [
-    "https://models.github.ai/inference/chat/completions",
-    "https://models.inference.ai.azure.com/chat/completions",
-]
+ENDPOINT = "https://models.github.ai/inference/chat/completions"
+
+
+def _parse(raw):
+    data = json.loads(raw)
+    return (data["choices"][0]["message"]["content"] or "").strip()
 
 
 def call_model(token, model, system, user):
-    body = {
+    payload = json.dumps({
         "model": model,
         "max_tokens": 1500,
         "temperature": 0.9,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
-    }
+    }, ensure_ascii=False)
     errors = []
-    for url in ENDPOINTS:
-        payload = dict(body)
-        if "azure.com" in url:  # 旧エンドポイントはモデル名に提供元を付けない
-            payload["model"] = model.split("/")[-1]
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(), method="POST",
-            headers={"Authorization": f"Bearer {token}",
-                     "Accept": "application/json",
-                     "Content-Type": "application/json"})
+
+    # 1) curl で呼び出し（GitHub 公式ドキュメントと同じ形式）
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+        f.write(payload)
+        body_file = f.name
+    try:
+        r = subprocess.run(
+            ["curl", "-sS", "-L", "-X", "POST", ENDPOINT,
+             "-H", "Accept: application/vnd.github+json",
+             "-H", f"Authorization: Bearer {token}",
+             "-H", "X-GitHub-Api-Version: 2022-11-28",
+             "-H", "Content-Type: application/json",
+             "--data-binary", f"@{body_file}",
+             "-w", "\n__STATUS__%{http_code}"],
+            capture_output=True, text=True, timeout=180)
+        out, _, status = r.stdout.rpartition("\n__STATUS__")
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                raw = r.read().decode("utf-8", "replace")
-                status = r.status
-        except urllib.error.HTTPError as e:
-            errors.append(f"{url} [{model}] HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
-            continue
-        except Exception as e:
-            errors.append(f"{url} [{model}] {type(e).__name__}: {e}")
-            continue
-        try:
-            data = json.loads(raw)
-            text = (data["choices"][0]["message"]["content"] or "").strip()
+            text = _parse(out)
             if text:
                 return text
-            errors.append(f"{url} [{model}] 空の応答")
+            errors.append(f"curl [{model}] 空の応答")
         except Exception:
-            errors.append(f"{url} [{model}] HTTP {status} JSON以外の応答: {raw[:300]!r}")
+            errors.append(f"curl [{model}] HTTP {status}: {out[:300]!r} {r.stderr[:200]}")
+    finally:
+        os.unlink(body_file)
+
+    # 2) Python 標準ライブラリで呼び出し
+    req = urllib.request.Request(
+        ENDPOINT, data=payload.encode("utf-8"), method="POST",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28",
+                 "Content-Type": "application/json",
+                 "User-Agent": "linkedin-autopost/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            try:
+                text = _parse(raw)
+                if text:
+                    return text
+                errors.append(f"urllib [{model}] 空の応答")
+            except Exception:
+                errors.append(f"urllib [{model}] HTTP {resp.status} {dict(resp.headers)}: {raw[:300]!r}")
+    except urllib.error.HTTPError as e:
+        errors.append(f"urllib [{model}] HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+    except Exception as e:
+        errors.append(f"urllib [{model}] {type(e).__name__}: {e}")
     raise RuntimeError("\n".join(errors))
 
 
