@@ -44,23 +44,49 @@ def recent_posts(limit=14):
     return "\n\n".join(out)
 
 
+ENDPOINTS = [
+    "https://models.github.ai/inference/chat/completions",
+    "https://models.inference.ai.azure.com/chat/completions",
+]
+
+
 def call_model(token, model, system, user):
-    body = json.dumps({
+    body = {
         "model": model,
         "max_tokens": 1500,
         "temperature": 0.9,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
-    }).encode()
-    req = urllib.request.Request(
-        "https://models.github.ai/inference/chat/completions", data=body, method="POST",
-        headers={"Authorization": f"Bearer {token}",
-                 "Accept": "application/vnd.github+json",
-                 "X-GitHub-Api-Version": "2022-11-28",
-                 "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = json.loads(r.read().decode())
-    return data["choices"][0]["message"]["content"].strip()
+    }
+    errors = []
+    for url in ENDPOINTS:
+        payload = dict(body)
+        if "azure.com" in url:  # 旧エンドポイントはモデル名に提供元を付けない
+            payload["model"] = model.split("/")[-1]
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), method="POST",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/json",
+                     "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                raw = r.read().decode("utf-8", "replace")
+                status = r.status
+        except urllib.error.HTTPError as e:
+            errors.append(f"{url} [{model}] HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+            continue
+        except Exception as e:
+            errors.append(f"{url} [{model}] {type(e).__name__}: {e}")
+            continue
+        try:
+            data = json.loads(raw)
+            text = (data["choices"][0]["message"]["content"] or "").strip()
+            if text:
+                return text
+            errors.append(f"{url} [{model}] 空の応答")
+        except Exception:
+            errors.append(f"{url} [{model}] HTTP {status} JSON以外の応答: {raw[:300]!r}")
+    raise RuntimeError("\n".join(errors))
 
 
 def main():
@@ -87,9 +113,9 @@ def main():
             text = call_model(key, m, SYSTEM.format(theme=theme), user)
             print(f"モデル {m} で作成しました。")
             break
-        except urllib.error.HTTPError as e:
-            last_err = f"{m}: {e.code} {e.read().decode()[:300]}"
-            print("失敗:", last_err)
+        except RuntimeError as e:
+            last_err = str(e)
+            print("失敗:\n" + last_err)
     if not text:
         sys.exit(f"投稿文を作成できませんでした。{last_err}")
 
