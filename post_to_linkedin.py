@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 
 JST = dt.timezone(dt.timedelta(hours=9))
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
 RESERVED = r"\|{}@[]()<>#*_~"
 
 

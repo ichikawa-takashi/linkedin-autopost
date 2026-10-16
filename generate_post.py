@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 
 JST = dt.timezone(dt.timedelta(hours=9))
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
 DEFAULT_MODELS = ["openai/gpt-4.1", "openai/gpt-4o", "openai/gpt-4.1-mini"]
 
 SYSTEM = """あなたは日本のビジネスパーソンの LinkedIn 投稿を代筆するライターです。
